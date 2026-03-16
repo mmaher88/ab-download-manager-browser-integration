@@ -9,8 +9,10 @@ import {onMessage} from "webext-bridge/content-script"
 import browser from "webextension-polyfill";
 import {createAlertStringForMyExtension} from "~/utils/AlertMessageCreator";
 import {addDownloads} from "~/contentscripts/AddDownloads";
+import {sendMessage} from "webext-bridge/content-script"
 import {isYouTubeVideoPage, extractVideoInfo, YouTubeFormat} from "~/contentscripts/youtube/YouTubeExtractor";
 import {DownloadableMedia} from "~/media/MediaOnTab";
+import * as VideoDetector from "~/contentscripts/VideoElementDetector";
 
 const showPopupDelayed = debounce(500)
 
@@ -37,6 +39,26 @@ function shouldCreatePopup() {
 // YouTube: track current video to avoid re-extracting
 let lastYouTubeVideoId: string | null = null
 let lastYouTubeTitle: string = ""
+
+// Merge network-intercepted media with DOM-detected videos
+let networkMedia: DownloadableMedia[] = []
+let domMedia: DownloadableMedia[] = []
+
+function updateMergedPopup() {
+    // Deduplicate by URL — DOM detection takes priority (has resolution info)
+    const seen = new Set<string>()
+    const merged: DownloadableMedia[] = []
+    for (const item of domMedia) {
+        seen.add(item.uri)
+        merged.push(item)
+    }
+    for (const item of networkMedia) {
+        if (!seen.has(item.uri)) {
+            merged.push(item)
+        }
+    }
+    MediaPopup.updatePopup(merged)
+}
 
 function formatSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`
@@ -123,7 +145,7 @@ run(async () => {
     selectionPopup.setOnPopupClicked(async () => {
         checkAndReportLinks()
     })
-    MediaPopup.setItemClickListener((media) => {
+    MediaPopup.setItemClickListener(async (media) => {
         // Check if this is a YouTube format item (has #ytformat= in URI)
         const ytMatch = media.uri.match(/#ytformat=(\d+)$/)
         if (ytMatch) {
@@ -139,19 +161,36 @@ run(async () => {
                 }
             ])
         } else {
-            addDownloads([
+            // Set browser UA + Referer — CDNs check these to prevent hotlinking
+            const headers: Record<string, string> = {
+                ...media.requestHeaders,
+                "User-Agent": navigator.userAgent,
+                "Referer": location.href,
+            }
+
+            await sendMessage("add_download", [
                 {
                     link: media.uri,
                     suggestedName: media.suggestedFullName ?? "",
                     type: media.type,
                     downloadPage: location.href,
-                    headers: media.requestHeaders ?? null,
+                    headers: headers,
                     description: null
                 }
-            ])
+            ], "background")
         }
         MediaPopup.toggleList(false)
     })
+
+    // DOM video element detection (direct MP4/WebM on any site)
+    // Skip on YouTube — we use ytInitialPlayerResponse instead
+    if (!isYouTubeVideoPage(location.href)) {
+        VideoDetector.setOnVideosChanged((media) => {
+            domMedia = media
+            updateMergedPopup()
+        })
+        VideoDetector.boot()
+    }
 
     // Initial YouTube check
     if (isYouTubeVideoPage(location.href)) {
@@ -199,7 +238,8 @@ run(async () => {
     onMessage("downloadable_media_detected", (msg) => {
         // Don't show generic HLS media popup on YouTube - we use extracted formats instead
         if (isYouTubeVideoPage(location.href)) return
-        MediaPopup.updatePopup(msg.data)
+        networkMedia = msg.data
+        updateMergedPopup()
     })
 }).catch(e => {
     console.log("failed to load ab-dm-extension", e)
