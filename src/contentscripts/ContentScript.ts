@@ -9,6 +9,7 @@ import {onMessage} from "webext-bridge/content-script"
 import browser from "webextension-polyfill";
 import {createAlertStringForMyExtension} from "~/utils/AlertMessageCreator";
 import {addDownloads} from "~/contentscripts/AddDownloads";
+import {bootYouTubeOverlay} from "~/contentscripts/YouTubeOverlay";
 
 const showPopupDelayed = debounce(500)
 
@@ -35,6 +36,7 @@ function shouldCreatePopup() {
 run(async () => {
     await Configs.boot()
     mousePosition.boot()
+    bootYouTubeOverlay()
     selectionPopup.setOnPopupClicked(async () => {
         checkAndReportLinks()
     })
